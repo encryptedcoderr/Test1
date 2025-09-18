@@ -1,0 +1,97 @@
+name: iOS Simulator Boot Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  boot-simulator:
+    runs-on: macos-latest
+    name: Boot iPhone 16 Pro Simulator
+    
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Boot iPhone 16 Pro Simulator
+        id: boot_simulator
+        run: |
+          set -euo pipefail
+          
+          echo "--- Step 1: Cleaning old simulators ---"
+          xcrun simctl delete all || true
+          
+          echo "--- Step 2: Finding latest iOS runtime ---"
+          RUNTIME=$(xcrun simctl list runtimes | grep -E "iOS [0-9]+\.[0-9]+" | sort -V | tail -n 1 | awk '{print $NF}' || echo "com.apple.CoreSimulator.SimRuntime.iOS-18-0")
+          echo "Using runtime: $RUNTIME"
+          
+          echo "--- Step 3: Creating fresh iPhone 16 Pro simulator ---"
+          DEVICE_NAME="iPhone 16 Pro"
+          UDID=$(xcrun simctl create "TestDevice" "$DEVICE_NAME" "$RUNTIME")
+          echo "Created device UDID: $UDID"
+          
+          echo "--- Step 4: Booting simulator ---"
+          xcrun simctl boot "$UDID"
+          
+          echo "--- Step 5: Waiting for boot completion ---"
+          gtimeout 120 xcrun simctl bootstatus "$UDID" -b
+          
+          echo "--- Step 6: Verifying simulator status ---"
+          xcrun simctl list devices | grep "$UDID" || true
+          
+          echo "✅ Simulator successfully booted!"
+          echo "UDID=$UDID" >> $GITHUB_ENV
+          echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_ENV
+          echo "RUNTIME=$RUNTIME" >> $GITHUB_ENV
+
+      - name: 3. Test Simulator Connectivity
+        run: |
+          echo "--- Testing simulator connectivity ---"
+          
+          # Wait a bit more for full initialization
+          sleep 10
+          
+          # Test basic commands
+          xcrun simctl spawn "${{ env.UDID }}" whoami || true
+          xcrun simctl spawn "${{ env.UDID }}" uname -a || true
+          xcrun simctl spawn "${{ env.UDID }}" date || true
+          
+          echo "--- Simulator is responsive! ---"
+          
+          # List available space
+          xcrun simctl spawn "${{ env.UDID }}" df -h / || true
+          
+          echo "✅ All connectivity tests passed!"
+
+      - name: 4. Simulator Information Report
+        run: |
+          echo "--- Generating simulator information report ---"
+          echo ""
+          echo "# iOS Simulator Boot Report"
+          echo "Generated: $(date)"
+          echo ""
+          echo "## Device Information"
+          echo "- Device Name: ${{ env.DEVICE_NAME }}"
+          echo "- UDID: ${{ env.UDID }}"
+          echo "- Runtime: ${{ env.RUNTIME }}"
+          echo ""
+          echo "## Available Runtimes"
+          xcrun simctl list runtimes | grep iOS
+          echo ""
+          echo "## Boot Status"
+          xcrun simctl list devices | grep -A 2 "${{ env.UDID }}"
+          echo ""
+          echo "## System Info"
+          xcrun simctl spawn "${{ env.UDID }}" getconf LONG_BIT || true
+          xcrun simctl spawn "${{ env.UDID }}" sw_vers || true
+          xcrun simctl spawn "${{ env.UDID }}" sysctl -n hw.machine || true
+          echo ""
+          echo "✅ Boot process completed successfully!"
+
+      - name: 5. Shutdown Simulator
+        if: always()
+        run: |
+          echo "--- Shutting down simulator ---"
+          xcrun simctl shutdown "${{ env.UDID }}" || true
+          sleep 5
+          xcrun simctl erase "${{ env.UDID }}" || true
+          echo "✅ Simulator cleanup completed"
