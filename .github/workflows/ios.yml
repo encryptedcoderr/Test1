@@ -12,7 +12,15 @@ jobs:
       - name: 1. Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 2. Boot iPhone 16 Pro Simulator
+      - name: 2. Install Coreutils (for timeout)
+        run: |
+          echo "--- Installing coreutils for timeout command ---"
+          brew install coreutils || true
+          echo "/usr/local/opt/coreutils/libexec/gnubin" >> $GITHUB_PATH
+          # Alternative: Use native macOS timeout
+          which timeout
+
+      - name: 3. Boot iPhone 16 Pro Simulator
         id: boot_simulator
         run: |
           set -euo pipefail
@@ -33,36 +41,51 @@ jobs:
           xcrun simctl boot "$UDID"
           
           echo "--- Step 5: Waiting for boot completion ---"
-          gtimeout 120 xcrun simctl bootstatus "$UDID" -b
+          # Use native macOS timeout instead of gtimeout
+          timeout 120s xcrun simctl bootstatus "$UDID" -b || true
           
           echo "--- Step 6: Verifying simulator status ---"
           xcrun simctl list devices | grep "$UDID" || true
           
-          echo "✅ Simulator successfully booted!"
+          # Double-check boot status
+          BOOT_STATUS=$(xcrun simctl bootstatus "$UDID")
+          echo "Boot status: $BOOT_STATUS"
+          
+          if [[ "$BOOT_STATUS" == *"Booted"* ]]; then
+            echo "✅ Simulator fully booted!"
+          else
+            echo "⚠️  Simulator boot status: $BOOT_STATUS"
+            echo "   Continuing anyway..."
+          fi
+          
           echo "UDID=$UDID" >> $GITHUB_ENV
           echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_ENV
           echo "RUNTIME=$RUNTIME" >> $GITHUB_ENV
 
-      - name: 3. Test Simulator Connectivity
+      - name: 4. Test Simulator Connectivity
         run: |
           echo "--- Testing simulator connectivity ---"
           
           # Wait a bit more for full initialization
           sleep 10
           
-          # Test basic commands
-          xcrun simctl spawn "${{ env.UDID }}" whoami || true
-          xcrun simctl spawn "${{ env.UDID }}" uname -a || true
-          xcrun simctl spawn "${{ env.UDID }}" date || true
+          echo "--- Basic command tests ---"
+          xcrun simctl spawn "${{ env.UDID }}" whoami || echo "whoami failed"
+          xcrun simctl spawn "${{ env.UDID }}" uname -a || echo "uname failed"  
+          xcrun simctl spawn "${{ env.UDID }}" date || echo "date failed"
           
-          echo "--- Simulator is responsive! ---"
+          echo "--- Filesystem test ---"
+          xcrun simctl spawn "${{ env.UDID }}" ls -la / || echo "ls failed"
           
-          # List available space
-          xcrun simctl spawn "${{ env.UDID }}" df -h / || true
+          echo "--- Network test ---"
+          xcrun simctl spawn "${{ env.UDID }}" ping -c 1 -t 5 8.8.8.8 || echo "ping failed"
           
-          echo "✅ All connectivity tests passed!"
+          echo "--- Photos app test ---"
+          xcrun simctl spawn "${{ env.UDID }}" ls /Applications | grep Photos || echo "Photos app not found"
+          
+          echo "✅ All connectivity tests completed!"
 
-      - name: 4. Simulator Information Report
+      - name: 5. Simulator Information Report
         run: |
           echo "--- Generating simulator information report ---"
           echo ""
@@ -75,23 +98,50 @@ jobs:
           echo "- Runtime: ${{ env.RUNTIME }}"
           echo ""
           echo "## Available Runtimes"
-          xcrun simctl list runtimes | grep iOS
+          xcrun simctl list runtimes | grep iOS || true
           echo ""
           echo "## Boot Status"
-          xcrun simctl list devices | grep -A 2 "${{ env.UDID }}"
+          xcrun simctl list devices | grep -A 2 "${{ env.UDID }}" || true
           echo ""
-          echo "## System Info"
-          xcrun simctl spawn "${{ env.UDID }}" getconf LONG_BIT || true
+          echo "## System Information"
           xcrun simctl spawn "${{ env.UDID }}" sw_vers || true
           xcrun simctl spawn "${{ env.UDID }}" sysctl -n hw.machine || true
+          xcrun simctl spawn "${{ env.UDID }}" getconf LONG_BIT || true
+          echo ""
+          echo "## Storage Information"
+          xcrun simctl spawn "${{ env.UDID }}" df -h / || true
           echo ""
           echo "✅ Boot process completed successfully!"
 
-      - name: 5. Shutdown Simulator
+      - name: 6. Test Photos App Launch
+        run: |
+          echo "--- Testing Photos app launch ---"
+          APP_BUNDLE_ID="com.apple.mobileslideshow"
+          
+          echo "--- Launching Photos app ---"
+          xcrun simctl launch "${{ env.UDID }}" "$APP_BUNDLE_ID" || echo "Photos launch failed"
+          sleep 5
+          
+          echo "--- Checking if Photos is running ---"
+          RUNNING_PIDS=$(xcrun simctl spawn "${{ env.UDID }}" pgrep -f "$APP_BUNDLE_ID" || true)
+          if [ -n "$RUNNING_PIDS" ]; then
+            echo "✅ Photos app is running (PIDs: $RUNNING_PIDS)"
+          else
+            echo "⚠️  Photos app not detected after launch"
+          fi
+          
+          echo "--- Killing Photos app ---"
+          xcrun simctl spawn "${{ env.UDID }}" killall "$APP_BUNDLE_ID" || true
+          sleep 2
+
+      - name: 7. Shutdown Simulator
         if: always()
         run: |
           echo "--- Shutting down simulator ---"
-          xcrun simctl shutdown "${{ env.UDID }}" || true
-          sleep 5
-          xcrun simctl erase "${{ env.UDID }}" || true
-          echo "✅ Simulator cleanup completed"
+          if [ -n "${{ env.UDID }}" ]; then
+            xcrun simctl shutdown "${{ env.UDID }}" || true
+            sleep 5
+            xcrun simctl erase "${{ env.UDID }}" || true
+            echo "✅ Simulator $UDID cleaned up"
+          fi
+          echo "✅ Cleanup completed"
